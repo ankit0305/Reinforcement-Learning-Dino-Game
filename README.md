@@ -109,11 +109,8 @@ flowchart TD
 ### 1. Training the Agent
 
 ```bash
-python chrome_dino_rl.py
+python dino_selenium.py
 ```
-
-* Set `DO_TRAIN = True` inside `main()` to enable training
-* Adjust `TOTAL_TIMESTEPS` for longer training sessions
 
 ### 2. Testing the Agent
 
@@ -136,17 +133,6 @@ model = PPO(
     n_steps=2048,
     batch_size=64,
 )
-```
-
----
-
-## 🎥 Demo Output
-
-After testing, the script can generate a `dino_demo.gif` showing the trained agent playing:
-
-```
-Saving demonstration GIF...
-GIF saved as 'dino_demo.gif'
 ```
 
 ---
