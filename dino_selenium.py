@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 
 import cv2
-import gym
+import gymnasium as gym
 import numpy as np
 from PIL import Image
-from gym import spaces
+from gymnasium import spaces
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException, TimeoutException
 from selenium.webdriver.common.by import By
@@ -34,7 +34,10 @@ class ChromeDinoEnv(gym.Env):
     - Optimized observation processing
     - Dynamic reward shaping
     - Improved game state detection
+    - Automatic ChromeDriver management
     """
+
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     def __init__(
         self,
@@ -42,7 +45,8 @@ class ChromeDinoEnv(gym.Env):
         screen_height: int = 96,
         chromedriver_path: Optional[str] = None,
         frame_stack: int = 4,
-        headless: bool = False
+        headless: bool = False,
+        render_mode: Optional[str] = None
     ):
         super().__init__()
         
@@ -51,6 +55,7 @@ class ChromeDinoEnv(gym.Env):
         self.chromedriver_path = chromedriver_path
         self.frame_stack = frame_stack
         self.headless = headless
+        self.render_mode = render_mode
         
         # Metrics
         self.episode_score = 0
@@ -84,7 +89,7 @@ class ChromeDinoEnv(gym.Env):
         }
 
     def _setup_driver(self):
-        """Initialize Chrome WebDriver with robust configuration"""
+        """Initialize Chrome WebDriver with automatic ChromeDriver management"""
         chrome_options = webdriver.ChromeOptions()
         chrome_options.add_argument("--mute-audio")
         chrome_options.add_argument("--disable-infobars")
@@ -93,33 +98,68 @@ class ChromeDinoEnv(gym.Env):
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=800,600")
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
         
         if self.headless:
-            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--headless=new")  # Use new headless mode
 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                from selenium.webdriver.chrome.service import Service
-                
+                # Use Selenium Manager for automatic driver management
+                # This avoids ChromeDriver version mismatch issues
                 if self.chromedriver_path:
+                    # Only use custom path if explicitly provided and needed
+                    from selenium.webdriver.chrome.service import Service
+                    print(f"Using custom ChromeDriver at: {self.chromedriver_path}")
                     service = Service(executable_path=self.chromedriver_path)
                     self._driver = webdriver.Chrome(service=service, options=chrome_options)
                 else:
+                    # Let Selenium Manager handle ChromeDriver automatically
+                    print("Using Selenium Manager for automatic ChromeDriver management...")
                     self._driver = webdriver.Chrome(options=chrome_options)
                 
-                print(f"Chrome driver initialized successfully")
+                print(f"✓ Chrome driver initialized successfully (attempt {attempt + 1})")
                 return
                 
             except Exception as e:
-                print(f"Driver initialization attempt {attempt + 1} failed: {e}")
+                error_msg = str(e)
+                print(f"✗ Driver initialization attempt {attempt + 1} failed: {error_msg}")
+                
+                # Check for version mismatch
+                if "version" in error_msg.lower() and "chromedriver" in error_msg.lower():
+                    print("\n" + "="*70)
+                    print("CHROMEDRIVER VERSION MISMATCH DETECTED")
+                    print("="*70)
+                    print("\nRecommended solutions:")
+                    print("1. Remove custom ChromeDriver and let Selenium manage it:")
+                    print("   rm /opt/homebrew/bin/chromedriver")
+                    print("   # Then restart this script")
+                    print("\n2. Or update Chrome to match your ChromeDriver:")
+                    print("   # Update Chrome to version 143")
+                    print("\n3. Or install webdriver-manager:")
+                    print("   pip install webdriver-manager")
+                    print("   # Then modify script to use ChromeDriverManager")
+                    print("="*70 + "\n")
+                
                 if attempt < max_retries - 1:
+                    print(f"Retrying in 2 seconds...")
                     time.sleep(2)
                 else:
-                    raise RuntimeError("Failed to initialize Chrome driver after multiple attempts")
+                    print("\n❌ Failed to initialize Chrome driver after multiple attempts")
+                    print("Please ensure:")
+                    print("  1. Google Chrome is installed")
+                    print("  2. Chrome and ChromeDriver versions match")
+                    print("  3. Or let Selenium Manager handle it automatically\n")
+                    raise RuntimeError(
+                        "Failed to initialize Chrome driver. "
+                        "Try removing custom ChromeDriver from PATH and let Selenium manage it."
+                    )
 
-    def reset(self) -> np.ndarray:
-        """Reset environment and return initial observation"""
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, dict]:
+        """Reset environment and return initial observation (Gymnasium API)"""
+        super().reset(seed=seed)
+        
         max_retries = 3
         
         for attempt in range(max_retries):
@@ -151,7 +191,7 @@ class ChromeDinoEnv(gym.Env):
                     self.state_queue.append(obs[:, :, 0])
                 
                 self.consecutive_failures = 0
-                return obs
+                return obs, {}  # Gymnasium returns (obs, info)
                 
             except Exception as e:
                 print(f"Reset attempt {attempt + 1} failed: {e}")
@@ -159,9 +199,9 @@ class ChromeDinoEnv(gym.Env):
                     time.sleep(1)
                     self._recover_driver()
                 else:
-                    return self._get_blank_observation()
+                    return self._get_blank_observation(), {}
         
-        return self._get_blank_observation()
+        return self._get_blank_observation(), {}
 
     def _recover_driver(self):
         """Attempt to recover from driver errors"""
@@ -203,7 +243,6 @@ class ChromeDinoEnv(gym.Env):
             image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         
         # Crop to game area (remove score and other UI elements)
-        # These values may need tuning based on your screen resolution
         image = image[120:400, 100:500]
         
         # Resize to target dimensions
@@ -265,10 +304,8 @@ class ChromeDinoEnv(gym.Env):
         - Score improvement: reward for increasing score
         """
         if done:
-            # Large penalty for dying
             reward = -10.0
         else:
-            # Base survival reward
             reward = 0.1
             
             # Progress reward (score increase)
@@ -279,8 +316,8 @@ class ChromeDinoEnv(gym.Env):
         self.last_score = score
         return reward
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
-        """Execute action and return transition"""
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        """Execute action and return transition (Gymnasium API with terminated/truncated)"""
         try:
             # Execute action
             if action in self.actions_map and self.actions_map[action] is not None:
@@ -292,11 +329,12 @@ class ChromeDinoEnv(gym.Env):
             
             # Get next state
             obs = self._get_observation()
-            done = self._is_game_over()
+            terminated = self._is_game_over()
+            truncated = False  # Game doesn't have time limits
             score = self._get_score()
             
             # Calculate reward
-            reward = self._calculate_reward(score, done)
+            reward = self._calculate_reward(score, terminated)
             
             self.num_steps += 1
             self.episode_score = score
@@ -307,26 +345,31 @@ class ChromeDinoEnv(gym.Env):
                 "episode_score": self.episode_score
             }
             
-            return obs, reward, done, info
+            return obs, reward, terminated, truncated, info
             
         except Exception as e:
             print(f"Step execution failed: {e}")
             obs = self._get_blank_observation()
-            return obs, -1.0, True, {"score": 0, "error": str(e)}
+            return obs, -1.0, True, False, {"score": 0, "error": str(e)}
 
-    def render(self, mode: str = 'rgb_array') -> Optional[np.ndarray]:
-        """Render environment"""
+    def render(self):
+        """Render environment (Gymnasium API)"""
+        if self.render_mode is None:
+            return None
+            
         try:
             img = self._capture_screenshot()
             
-            if mode == 'rgb_array':
+            if self.render_mode == 'rgb_array':
                 if len(img.shape) == 3:
                     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 return img
-            elif mode == 'human':
+            elif self.render_mode == 'human':
+                if len(img.shape) == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 cv2.imshow('Chrome Dino', img)
                 cv2.waitKey(1)
-                return img
+                return None
                 
         except Exception as e:
             print(f"Render failed: {e}")
@@ -340,6 +383,9 @@ class ChromeDinoEnv(gym.Env):
             except:
                 pass
             self._driver = None
+        
+        # Close OpenCV windows if any
+        cv2.destroyAllWindows()
 
 
 def make_env(rank: int, config: Dict[str, Any]):
@@ -373,7 +419,8 @@ def train_model(
         "screen_height": 96,
         "chromedriver_path": chromedriver_path,
         "frame_stack": 4,
-        "headless": False
+        "headless": False,
+        "render_mode": None
     }
     
     print(f"Creating {num_envs} training environments...")
@@ -381,7 +428,9 @@ def train_model(
     env = VecMonitor(env)
     
     # Create evaluation environment
-    eval_env = ChromeDinoEnv(**env_config)
+    eval_config = env_config.copy()
+    eval_config["render_mode"] = None
+    eval_env = ChromeDinoEnv(**eval_config)
     eval_env = Monitor(eval_env)
     
     print("Initializing PPO model...")
@@ -417,6 +466,7 @@ def train_model(
     )
     
     print("Starting training...")
+    print("="*70)
     model.learn(
         total_timesteps=total_timesteps,
         callback=[checkpoint_callback, eval_callback]
@@ -425,7 +475,8 @@ def train_model(
     # Save final model
     final_path = save_path / "final_model"
     model.save(str(final_path))
-    print(f"Training complete! Model saved to {final_path}")
+    print("="*70)
+    print(f"✓ Training complete! Model saved to {final_path}")
     
     env.close()
     eval_env.close()
@@ -448,30 +499,32 @@ def evaluate_model(
         screen_width=96,
         screen_height=96,
         chromedriver_path=chromedriver_path,
-        headless=False
+        headless=False,
+        render_mode='rgb_array' if save_gif else None
     )
     
     scores = []
     images = [] if save_gif else None
     
     for episode in range(num_episodes):
-        obs = env.reset()
-        done = False
+        obs, info = env.reset()
+        terminated = False
+        truncated = False
         episode_reward = 0
         
         print(f"\nEpisode {episode + 1}/{num_episodes}")
         
-        while not done:
+        while not (terminated or truncated):
             # Predict action
             action, _ = model.predict(obs, deterministic=True)
             
             # Take step
-            obs, reward, done, info = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
             episode_reward += reward
             
             # Capture frame for GIF
             if save_gif and episode == 0:
-                frame = env.render(mode='rgb_array')
+                frame = env.render()
                 if frame is not None:
                     images.append(frame)
         
@@ -494,7 +547,7 @@ def evaluate_model(
         gif_path = "dino_demo.gif"
         print(f"\nSaving demonstration to {gif_path}...")
         imageio.mimsave(gif_path, images, fps=20)
-        print(f"GIF saved successfully!")
+        print(f"✓ GIF saved successfully!")
 
 
 def main():
@@ -512,14 +565,16 @@ def main():
     parser.add_argument('--model-path', type=str, default='./models/final_model',
                        help='Path to model for evaluation')
     parser.add_argument('--chromedriver', type=str, default=None,
-                       help='Path to chromedriver executable')
+                       help='Path to chromedriver executable (optional, Selenium Manager handles it)')
     parser.add_argument('--eval-episodes', type=int, default=10,
                        help='Number of evaluation episodes')
     
     args = parser.parse_args()
     
     if args.mode in ['train', 'both']:
-        print("Starting training...")
+        print("\n" + "="*70)
+        print("STARTING TRAINING")
+        print("="*70 + "\n")
         model = train_model(
             total_timesteps=args.timesteps,
             num_envs=args.num_envs,
@@ -527,7 +582,9 @@ def main():
         )
     
     if args.mode in ['eval', 'both']:
-        print("\nStarting evaluation...")
+        print("\n" + "="*70)
+        print("STARTING EVALUATION")
+        print("="*70 + "\n")
         evaluate_model(
             model_path=args.model_path,
             num_episodes=args.eval_episodes,
